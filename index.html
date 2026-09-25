@@ -1,0 +1,1150 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>yuto.kimura/healthz</title>
+<meta name="theme-color" content="#000000">
+<meta name="color-scheme" content="dark">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23000'/%3E%3Ccircle cx='16' cy='16' r='7' fill='%23f06a28'/%3E%3Ccircle cx='16' cy='16' r='3' fill='%23fde07c'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --void: #000000;
+    --ink: #bfcdb0;
+    --beat: 0;
+    --gutter: clamp(18px, 3.2vw, 44px);
+  }
+
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: var(--void);
+    overflow: hidden;
+  }
+
+  body {
+    color: var(--ink);
+    -webkit-font-smoothing: antialiased;
+    touch-action: none;
+  }
+
+  /* キャンバスには輝度だけを描き、色はこの LUT で一括して決める */
+  #tissue {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+    filter: url(#lut);
+  }
+
+  /* コアだけは別のキャンバスに描き、暖色の LUT をかけて screen で重ねる */
+  #core {
+    position: fixed;
+    left: 0;
+    top: 0;
+    display: block;
+    pointer-events: none;
+    filter: url(#lut-core);
+    mix-blend-mode: screen;
+  }
+
+  .lens {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    background: radial-gradient(125% 110% at 50% 50%, transparent 48%, rgba(0, 0, 0, .66) 100%);
+  }
+
+  h1 {
+    position: fixed;
+    left: calc(var(--gutter) + env(safe-area-inset-left));
+    top: calc(var(--gutter) + env(safe-area-inset-top));
+    margin: 0;
+    font-family: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-weight: 400;
+    font-size: clamp(15px, 0.45vw + 11.5px, 19px);
+    line-height: 1;
+    letter-spacing: 0;
+    opacity: calc(0.66 + var(--beat) * 0.34);
+    text-shadow:
+      0 0 10px rgba(0, 0, 0, 0.9),
+      0 0 22px rgba(0, 0, 0, 0.8),
+      0 0 calc(var(--beat) * 16px) rgba(164, 214, 40, calc(var(--beat) * 0.85));
+    user-select: none;
+  }
+
+  .defs {
+    position: absolute;
+    width: 0;
+    height: 0;
+  }
+</style>
+</head>
+<body>
+<canvas id="tissue" aria-hidden="true"></canvas>
+<canvas id="core" aria-hidden="true"></canvas>
+<div class="lens" aria-hidden="true"></div>
+<h1>yuto.kimura/healthz</h1>
+
+<svg class="defs" aria-hidden="true" focusable="false">
+  <filter id="lut" color-interpolation-filters="sRGB" x="0" y="0" width="100%" height="100%">
+    <feComponentTransfer>
+      <feFuncR type="table" tableValues="0 1"/>
+      <feFuncG type="table" tableValues="0 1"/>
+      <feFuncB type="table" tableValues="0 1"/>
+    </feComponentTransfer>
+  </filter>
+  <filter id="lut-core" color-interpolation-filters="sRGB" x="0" y="0" width="100%" height="100%">
+    <feComponentTransfer>
+      <feFuncR type="table" tableValues="0 1"/>
+      <feFuncG type="table" tableValues="0 1"/>
+      <feFuncB type="table" tableValues="0 1"/>
+    </feComponentTransfer>
+  </filter>
+</svg>
+
+<script>
+(() => {
+  'use strict';
+
+  const TAU = Math.PI * 2;
+  const PAD = 28;
+
+  // 輝度 0..1 → 色。組織は GCaMP の蛍光のようなライム、コアは inferno 系の暖色
+  const LUT_TISSUE = [
+    [0.00, 0x000000],
+    [0.05, 0x020703],
+    [0.12, 0x061a09],
+    [0.20, 0x0d2f10],
+    [0.30, 0x1a4814],
+    [0.42, 0x2f6a17],
+    [0.54, 0x4d8e19],
+    [0.65, 0x74b01c],
+    [0.76, 0x9dd022],
+    [0.86, 0xc4ea3a],
+    [0.94, 0xe6f98a],
+    [1.00, 0xfbffe8],
+  ];
+
+  const LUT_CORE = [
+    [0.00, 0x000000],
+    [0.05, 0x06030e],
+    [0.12, 0x160a34],
+    [0.20, 0x2a0f5a],
+    [0.30, 0x481274],
+    [0.42, 0x741a78],
+    [0.54, 0xa32668],
+    [0.65, 0xd03e48],
+    [0.76, 0xef6a28],
+    [0.86, 0xfba22a],
+    [0.94, 0xfde07c],
+    [1.00, 0xfffcee],
+  ];
+
+  const LAYER_DEFS = [
+    { spacing: 104, scale: 0.6, gain: 0.62, blur: 2.4, parallax: 0.35, drift: 0.6, sharp: false, clear: 1.6, wander: 14, turn: 0.014 },
+    { spacing: 150, scale: 1.0, gain: 1.0, blur: 0, parallax: 1.0, drift: 1.0, sharp: true, clear: 2.2, wander: 6, turn: 0.007 },
+  ];
+
+  const SIM = {
+    leak: 0.28,
+    spont: 0.34,
+    heartKick: 0.16,
+    targetRate: 0.2,
+    spikeSpeed: 300,
+    dendriteWave: 520,
+    trail: 84,
+    maxSpikes: 480,
+    breathPeriod: 4.8,
+    dub: 0.27,
+  };
+
+  const canvas = document.getElementById('tissue');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  const coreCanvas = document.getElementById('core');
+  const cctx = coreCanvas.getContext('2d', { alpha: false });
+  const title = document.querySelector('h1');
+  const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
+
+  const rand = Math.random;
+  const rr = (a, b) => a + (b - a) * rand();
+  const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+  const white = (a) => `rgba(255,255,255,${clamp(a, 0, 1).toFixed(3)})`;
+
+  // 周期の揃わない正弦波を重ねた、ゆっくりさまよう値（-1..1）
+  function wanderer(fMin, fMax) {
+    const parts = [0, 1, 2].map(() => ({ f: rr(fMin, fMax) * TAU, p: rr(0, TAU), a: rr(0.5, 1) }));
+    const sum = parts.reduce((s, o) => s + o.a, 0);
+    return (t) => parts.reduce((s, o) => s + o.a * Math.sin(o.f * t + o.p), 0) / sum;
+  }
+
+  // ---------------------------------------------------------------- LUT
+
+  function installLUT(id, stops) {
+    const n = 64;
+    const ch = [[], [], []];
+    for (let i = 0; i < n; i++) {
+      const x = i / (n - 1);
+      let k = 0;
+      while (k < stops.length - 2 && stops[k + 1][0] < x) k++;
+      const [x0, c0] = stops[k];
+      const [x1, c1] = stops[k + 1];
+      const u = clamp((x - x0) / (x1 - x0), 0, 1);
+      for (let c = 0; c < 3; c++) {
+        const shift = 16 - c * 8;
+        const a = (c0 >> shift) & 255;
+        const b = (c1 >> shift) & 255;
+        ch[c].push(((a + (b - a) * u) / 255).toFixed(4));
+      }
+    }
+    const funcs = document.querySelectorAll(`#${id} feFuncR, #${id} feFuncG, #${id} feFuncB`);
+    funcs.forEach((f, c) => f.setAttribute('tableValues', ch[c].join(' ')));
+  }
+
+  // ---------------------------------------------------------------- sprites
+
+  function newCanvas(w, h) {
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(w));
+    c.height = Math.max(1, Math.round(h));
+    return c;
+  }
+
+  function makeGlow(size) {
+    const c = newCanvas(size, size);
+    const g = c.getContext('2d');
+    const h = size / 2;
+    const grd = g.createRadialGradient(h, h, 0, h, h, h);
+    grd.addColorStop(0.00, 'rgba(255,255,255,1)');
+    grd.addColorStop(0.12, 'rgba(255,255,255,0.62)');
+    grd.addColorStop(0.35, 'rgba(255,255,255,0.18)');
+    grd.addColorStop(0.65, 'rgba(255,255,255,0.05)');
+    grd.addColorStop(1.00, 'rgba(255,255,255,0)');
+    g.fillStyle = grd;
+    g.fillRect(0, 0, size, size);
+    return c;
+  }
+
+  const GLOW = makeGlow(128);
+
+  function glowAt(g, x, y, r, a) {
+    if (a <= 0.003) return;
+    g.globalAlpha = Math.min(1, a);
+    g.drawImage(GLOW, x - r, y - r, r * 2, r * 2);
+    g.globalAlpha = 1;
+  }
+
+  // 神経線維を巻いた糸玉。球面の大円を少し歪ませて重ねる
+  function makeKnot(R, res) {
+    const size = Math.ceil(R * 2.7 * res);
+    const c = newCanvas(size, size);
+    const g = c.getContext('2d');
+    g.setTransform(res, 0, 0, res, size / 2, size / 2);
+    g.globalCompositeOperation = 'lighter';
+    g.lineCap = 'round';
+    for (let i = 0; i < 54; i++) {
+      const tilt = Math.acos(rr(-1, 1));
+      const rot = rr(0, TAU);
+      const rad = R * rr(0.5, 1.0);
+      const ox = rr(-0.1, 0.1) * R;
+      const oy = rr(-0.1, 0.1) * R;
+      const k1 = 2 + ((rand() * 3) | 0);
+      const ph = rr(0, TAU);
+      const amp = rr(0.03, 0.12);
+      const cr = Math.cos(rot);
+      const sr = Math.sin(rot);
+      const ct = Math.cos(tilt);
+      g.beginPath();
+      for (let j = 0; j <= 72; j++) {
+        const a = (j / 72) * TAU;
+        const wob = 1 + amp * Math.sin(k1 * a + ph);
+        const ex = Math.cos(a) * rad * wob;
+        const ey = Math.sin(a) * rad * ct * wob;
+        const x = ox + ex * cr - ey * sr;
+        const y = oy + ex * sr + ey * cr;
+        if (j === 0) g.moveTo(x, y);
+        else g.lineTo(x, y);
+      }
+      g.lineWidth = rr(0.6, 1.5);
+      g.strokeStyle = white(rr(0.05, 0.12));
+      g.stroke();
+    }
+    return c;
+  }
+
+  // ---------------------------------------------------------------- morphology
+
+  function growNeuron(x, y, s, sharp, orient) {
+    const pyramidal = rand() < 0.7;
+    const somaR = (pyramidal ? rr(5.6, 7.6) : rr(4.2, 5.6)) * s;
+    const n = {
+      x, y, s, pyramidal, orient, somaR,
+      v: rr(-0.2, 0.5), thr: 1, refr: 0, act: 0, psp: 0,
+      fireT: -99, drive: 0, driveT: 0,
+      nodes: [], reach: 0, buckets: [], soma: null, axon: null, dO: 0, aO: 0,
+    };
+
+    const buckets = new Map();
+    const bucket = (w) => {
+      const key = Math.max(0.5, Math.round(w * 4) / 4);
+      let b = buckets.get(key);
+      if (!b) {
+        b = { w: key, path: new Path2D(), lx: NaN, ly: NaN };
+        buckets.set(key, b);
+      }
+      return b;
+    };
+    const seg = (x1, y1, x2, y2, w) => {
+      const b = bucket(w);
+      if (b.lx !== x1 || b.ly !== y1) b.path.moveTo(x1, y1);
+      b.path.lineTo(x2, y2);
+      b.lx = x2;
+      b.ly = y2;
+      const d = Math.hypot(x2 - x, y2 - y);
+      if (d > n.reach) n.reach = d;
+    };
+
+    const grow = (px, py, ang, w0, len, depth, bp, tuft) => {
+      const step = 3.2;
+      let travelled = 0;
+      let turn = rr(-0.03, 0.03);
+      while (travelled < len) {
+        turn = (turn + rr(-0.05, 0.05)) * 0.86;
+        ang += turn + rr(-0.07, 0.07);
+        const nx = px + Math.cos(ang) * step;
+        const ny = py + Math.sin(ang) * step;
+        const t = travelled / len;
+        const w = Math.max(0.5, w0 * (1 - t * 0.72));
+        seg(px, py, nx, ny, w);
+        travelled += step;
+        px = nx;
+        py = ny;
+
+        if (sharp && t > 0.12 && rand() < 0.2) {
+          const sa = ang + (rand() < 0.5 ? 1 : -1) * rr(1.0, 1.7);
+          const sl = rr(1.4, 3.2) * s;
+          seg(px, py, px + Math.cos(sa) * sl, py + Math.sin(sa) * sl, 0.5);
+          bucket(w).lx = NaN;
+        }
+        if (travelled > 14 * s && rand() < 0.14) n.nodes.push({ x: px, y: py });
+
+        const p = tuft && t > 0.72 ? bp * 4 : bp;
+        if (depth < 4 && travelled > 10 * s && travelled < len - 8 * s && rand() < p) {
+          const side = rand() < 0.5 ? 1 : -1;
+          const spread = tuft && t > 0.72 ? rr(0.5, 1.0) : rr(0.35, 0.85);
+          const childLen = tuft && t <= 0.72 ? rr(22, 60) * s : (len - travelled) * rr(0.45, 0.85);
+          grow(px, py, ang + side * spread, w * 0.78, childLen, depth + 1, bp * 1.1, false);
+          ang -= side * rr(0.1, 0.28);
+          bucket(w).lx = NaN;
+        }
+      }
+    };
+
+    if (pyramidal) {
+      const L = rr(110, 210) * s;
+      grow(x + Math.cos(orient) * somaR, y + Math.sin(orient) * somaR, orient, 2.6 * s, L, 0, 0.042, true);
+      const nb = 4 + ((rand() * 4) | 0);
+      const fan = rr(2.6, 3.4);
+      for (let i = 0; i < nb; i++) {
+        const a = orient + Math.PI + (i / (nb - 1) - 0.5) * fan + rr(-0.2, 0.2);
+        grow(x + Math.cos(a) * somaR * 0.8, y + Math.sin(a) * somaR * 0.8, a, 1.8 * s, rr(40, 100) * s, 1, 0.06, false);
+      }
+    } else {
+      const nd = 6 + ((rand() * 4) | 0);
+      const a0 = rand() * TAU;
+      for (let i = 0; i < nd; i++) {
+        const a = a0 + (i / nd) * TAU + rr(-0.3, 0.3);
+        grow(x + Math.cos(a) * somaR * 0.8, y + Math.sin(a) * somaR * 0.8, a, 1.4 * s, rr(38, 90) * s, 1, 0.06, false);
+      }
+    }
+    n.buckets = [...buckets.values()].sort((a, b) => a.w - b.w);
+
+    // 細胞体はリング状。GCaMP は核から排除されるので、核の部分が暗く抜ける
+    const soma = new Path2D();
+    const phase = rand() * TAU;
+    for (let k = 0; k <= 28; k++) {
+      const th = (k / 28) * TAU;
+      const c = Math.cos(th - orient);
+      const r = pyramidal
+        ? somaR * (0.8 + 0.16 * c + 0.62 * Math.max(0, c) ** 5)
+        : somaR * (0.92 + 0.1 * Math.sin(3 * th + phase));
+      const px = x + Math.cos(th) * r;
+      const py = y + Math.sin(th) * r;
+      if (k === 0) soma.moveTo(px, py);
+      else soma.lineTo(px, py);
+    }
+    soma.closePath();
+    soma.ellipse(x, y, somaR * 0.46, somaR * 0.4, orient, 0, TAU, true);
+    n.soma = soma;
+    return n;
+  }
+
+  function walk(x, y, ang, len, wiggle) {
+    const pts = [x, y];
+    const step = 3.5;
+    let turn = 0;
+    for (let d = 0; d < len; d += step) {
+      turn = (turn + rr(-wiggle, wiggle)) * 0.8;
+      ang += turn;
+      x += Math.cos(ang) * step;
+      y += Math.sin(ang) * step;
+      pts.push(x, y);
+    }
+    return { pts, ang };
+  }
+
+  function steer(x, y, ang, tx, ty) {
+    const pts = [x, y];
+    const step = 3.5;
+    let turn = 0;
+    for (let i = 0; i < 480; i++) {
+      const dist = Math.hypot(tx - x, ty - y);
+      if (dist < 7) break;
+      let d = Math.atan2(ty - y, tx - x) - ang;
+      d = Math.atan2(Math.sin(d), Math.cos(d));
+      const k = i < 5 ? 0.02 : dist < 70 ? 0.22 : 0.075;
+      turn = (turn + rr(-0.06, 0.06)) * 0.82;
+      ang += clamp(d, -k, k) + turn;
+      x += Math.cos(ang) * step;
+      y += Math.sin(ang) * step;
+      pts.push(x, y);
+    }
+    pts.push(tx, ty);
+    return pts;
+  }
+
+  function makeBranch(pts) {
+    const n = pts.length / 2;
+    const cum = new Float32Array(n);
+    for (let i = 1; i < n; i++) {
+      cum[i] = cum[i - 1] + Math.hypot(pts[i * 2] - pts[i * 2 - 2], pts[i * 2 + 1] - pts[i * 2 - 1]);
+    }
+    return {
+      pts: Float32Array.from(pts), cum, len: cum[n - 1], kids: [], target: null, w: 0,
+      ex: pts[pts.length - 2], ey: pts[pts.length - 1],
+    };
+  }
+
+  function wireAxons(neurons, s) {
+    for (const n of neurons) {
+      const cands = [];
+      for (const m of neurons) {
+        if (m === n) continue;
+        const d = Math.hypot(m.x - n.x, m.y - n.y);
+        if (d > 44 * s && d < 360 * s) cands.push({ m, d });
+      }
+      cands.sort((a, b) => a.d - b.d);
+      const pool = cands.slice(0, 7);
+
+      // 細胞体の根元（コア側）から軸索が出る
+      const base = n.orient + Math.PI + rr(-0.35, 0.35);
+      const trunkWalk = walk(n.x + Math.cos(base) * n.somaR, n.y + Math.sin(base) * n.somaR, base, rr(14, 34) * s, 0.05);
+      const trunk = makeBranch(trunkWalk.pts);
+
+      const count = Math.min(pool.length, 1 + (rand() < 0.55) + (rand() < 0.4));
+      for (let i = 0; i < count; i++) {
+        const idx = Math.floor(rand() ** 1.5 * pool.length);
+        const { m } = pool.splice(idx, 1)[0];
+        const node = m.nodes.length ? m.nodes[(rand() * m.nodes.length) | 0] : { x: m.x, y: m.y };
+        const b = makeBranch(steer(trunk.ex, trunk.ey, trunkWalk.ang + rr(-0.9, 0.9), node.x, node.y));
+        b.target = m;
+        b.w = rr(0.6, 1.0);
+        trunk.kids.push(b);
+      }
+      if (rand() < 0.45) {
+        const side = rand() < 0.5 ? 1 : -1;
+        trunk.kids.push(makeBranch(walk(trunk.ex, trunk.ey, trunkWalk.ang + side * rr(0.7, 1.3), rr(26, 72) * s, 0.12).pts));
+      }
+      n.axon = trunk;
+    }
+  }
+
+  function scatter(count, minD, x0, y0, x1, y1, accept) {
+    const pts = [];
+    const m2 = minD * minD;
+    for (let tries = 0; pts.length < count && tries < count * 150; tries++) {
+      const x = rr(x0, x1);
+      const y = rr(y0, y1);
+      let ok = accept(x, y);
+      for (let i = 0; ok && i < pts.length; i++) {
+        if ((pts[i].x - x) ** 2 + (pts[i].y - y) ** 2 < m2) ok = false;
+      }
+      if (ok) pts.push({ x, y });
+    }
+    return pts;
+  }
+
+  function buildLayer(def, vs, shape) {
+    const s = def.scale * vs;
+    const sp = def.spacing * vs;
+    const C = state.core;
+    const half = Math.hypot(state.w, state.h) / 2;
+    const x0 = -PAD - 50 * s;
+    const x1 = state.w + PAD + 50 * s;
+    const y0 = -PAD - 50 * s;
+    const y1 = state.h + PAD + 50 * s;
+    const count = Math.round((((x1 - x0) * (y1 - y0)) / (sp * sp)) * 0.62);
+    // コアの周りほど密に、端ほど疎に。広がり方は方向ごとに少し偏らせる
+    const T = state.titleBox;
+    const keep = 70 * s;
+    const accept = (x, y) => {
+      const d = Math.hypot(x - C.x, y - C.y);
+      if (d < C.R * def.clear) return false;
+      // 文字の周りには細胞体を置かない
+      if (def.sharp && x > T.left - keep && x < T.right + keep && y > T.top - keep && y < T.bottom + keep) return false;
+      const th = Math.atan2(y - C.y, x - C.x);
+      const reach = 0.62 * half * (1 + shape.a1 * Math.cos(th - shape.p1) + shape.a2 * Math.cos(2 * th - shape.p2));
+      return rand() < 0.26 + 0.74 * Math.exp(-((d / reach) ** 2));
+    };
+    const neurons = scatter(count, sp * 0.52, x0, y0, x1, y1, accept).map((p) => {
+      const orient = Math.atan2(p.y - C.y, p.x - C.x) + rr(-0.3, 0.3);
+      return growNeuron(p.x, p.y, s, def.sharp, orient);
+    });
+    wireAxons(neurons, s);
+
+    const axonPath = new Path2D();
+    const boutons = new Path2D();
+    const addBranch = (b) => {
+      const p = b.pts;
+      axonPath.moveTo(p[0], p[1]);
+      for (let i = 2; i < p.length; i += 2) axonPath.lineTo(p[i], p[i + 1]);
+      if (b.target) {
+        boutons.moveTo(b.ex + 1.7 * s, b.ey);
+        boutons.arc(b.ex, b.ey, 1.7 * s, 0, TAU);
+      }
+      b.kids.forEach(addBranch);
+    };
+    neurons.forEach((n) => addBranch(n.axon));
+
+    for (const n of neurons) {
+      n.dO = Math.hypot(n.x - C.x, n.y - C.y);
+      n.aO = Math.atan2(n.y - C.y, n.x - C.x);
+    }
+    return {
+      def, s, neurons, axonPath, boutons,
+      m: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+      wx: wanderer(0.02, 0.07), wy: wanderer(0.02, 0.07), wr: wanderer(0.015, 0.05),
+    };
+  }
+
+  // ---------------------------------------------------------------- state
+
+  const state = {
+    w: 0, h: 0, dpr: 1, quality: 1, vs: 1,
+    layers: [], spikes: [], syn: [], waves: [],
+    t: 0, nextBeat: 0.35, lastBeat: -9, nextIdea: 1.2,
+    G: 1, rate: SIM.targetRate, fires: 0,
+    core: {
+      x: 0, y: 0, x0: 0, y0: 0, R: 60, ox: 0, oy: 0, knots: [], knotRes: 1,
+      wx: wanderer(0.03, 0.09), wy: wanderer(0.03, 0.09), ws: wanderer(0.05, 0.14),
+    },
+    waveSpeed: 800, waveMax: 1500, waveWidth: 160,
+    pointer: { x: 0, y: 0, nx: 0, ny: 0, energy: 0, seen: false },
+    par: { x: 0, y: 0 }, excite: 0, pulse: 0,
+    raster: { back: null, near: null, backRes: 1, grain: null },
+    titleAt: { x: 0, y: 0 }, titleBox: null,
+    frameEMA: 1 / 60, frames: 0,
+  };
+
+  // ---------------------------------------------------------------- rasters
+
+  function strokeStructure(g, layer, widthMul, alphaMul) {
+    g.globalCompositeOperation = 'lighter';
+    g.lineCap = 'round';
+    g.lineJoin = 'round';
+    const s = layer.s;
+    g.lineWidth = 0.8 * s * widthMul;
+    g.strokeStyle = white(0.11 * alphaMul);
+    g.stroke(layer.axonPath);
+    g.fillStyle = white(0.32 * alphaMul);
+    g.fill(layer.boutons);
+    for (const n of layer.neurons) {
+      for (const b of n.buckets) {
+        g.lineWidth = b.w * widthMul;
+        g.strokeStyle = white((0.1 + 0.05 * b.w / s) * alphaMul);
+        g.stroke(b.path);
+      }
+      g.fillStyle = white(0.4 * alphaMul);
+      g.fill(n.soma, 'evenodd');
+    }
+  }
+
+  function buildRasters() {
+    const { w, h, dpr } = state;
+    const fw = w + PAD * 2;
+    const fh = h + PAD * 2;
+    const [far, near] = state.layers;
+
+    // 奥: 焦点の外にある組織（細胞核のぼけ、ピントの合っていない層）
+    const backRes = Math.min(dpr, 1.25);
+    const back = newCanvas(fw * backRes, fh * backRes);
+    const bg = back.getContext('2d');
+    bg.setTransform(backRes, 0, 0, backRes, PAD * backRes, PAD * backRes);
+    bg.globalCompositeOperation = 'lighter';
+    const blobs = Math.round((fw * fh) / 7000);
+    for (let i = 0; i < blobs; i++) {
+      glowAt(bg, rr(-PAD, w + PAD), rr(-PAD, h + PAD), rr(5, 22), rr(0.03, 0.09));
+    }
+
+    const farC = newCanvas(fw * backRes, fh * backRes);
+    const fg = farC.getContext('2d');
+    fg.setTransform(backRes, 0, 0, backRes, PAD * backRes, PAD * backRes);
+    const canBlur = (() => { fg.filter = 'blur(1px)'; const ok = fg.filter === 'blur(1px)'; fg.filter = 'none'; return ok; })();
+    strokeStructure(fg, far, canBlur ? 1 : 2.4, far.def.gain * (canBlur ? 1.35 : 0.55));
+    bg.setTransform(1, 0, 0, 1, 0, 0);
+    if (canBlur) bg.filter = `blur(${(far.def.blur * backRes).toFixed(2)}px)`;
+    bg.drawImage(farC, 0, 0);
+    bg.filter = 'none';
+
+    const grain = newCanvas(160, 160);
+    const gg = grain.getContext('2d');
+    const img = gg.createImageData(160, 160);
+    for (let i = 0; i < img.data.length; i += 4) {
+      const v = (rand() ** 3) * 26;
+      img.data[i] = img.data[i + 1] = img.data[i + 2] = v;
+      img.data[i + 3] = 255;
+    }
+    gg.putImageData(img, 0, 0);
+
+    // 手前: ピントの合った層
+    const nearC = newCanvas(fw * dpr, fh * dpr);
+    const ng = nearC.getContext('2d');
+    ng.setTransform(dpr, 0, 0, dpr, PAD * dpr, PAD * dpr);
+    strokeStructure(ng, near, 1, 1);
+
+    state.core.knotRes = dpr;
+    state.core.knots = [makeKnot(state.core.R, dpr), makeKnot(state.core.R * 0.82, dpr)];
+
+    state.raster = {
+      back, near: nearC, backRes,
+      grain: ctx.createPattern(grain, 'repeat'),
+    };
+  }
+
+  // ---------------------------------------------------------------- build
+
+  function sizeCanvas() {
+    state.dpr = Math.min(window.devicePixelRatio || 1, 2) * state.quality;
+    canvas.width = Math.round(state.w * state.dpr);
+    canvas.height = Math.round(state.h * state.dpr);
+  }
+
+  // コアのキャンバスは、光の広がりが収まる正方形だけを中心に置く
+  function sizeCore() {
+    const C = state.core;
+    const S = Math.ceil(C.R * 11);
+    C.x0 = C.x - S / 2;
+    C.y0 = C.y - S / 2;
+    coreCanvas.width = Math.round(S * state.dpr);
+    coreCanvas.height = Math.round(S * state.dpr);
+    coreCanvas.style.width = `${S}px`;
+    coreCanvas.style.height = `${S}px`;
+    coreCanvas.style.transform = `translate(${C.x0}px, ${C.y0}px)`;
+  }
+
+  function build() {
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    state.w = w;
+    state.h = h;
+    sizeCanvas();
+    const vs = clamp(Math.sqrt(w * h) / 1100, 0.72, 1.2);
+    state.vs = vs;
+
+    const C = state.core;
+    C.x = w * 0.5;
+    C.y = h * 0.5;
+    C.R = clamp(Math.min(w, h) * 0.08, 32, 80);
+    state.waveMax = Math.hypot(w * 0.5 + PAD, h * 0.5 + PAD);
+    state.waveWidth = clamp(Math.min(w, h) * 0.2, 90, 200);
+    state.waveSpeed = (state.waveMax - C.R) / 1.2;
+    sizeCore();
+
+    const r = title.getBoundingClientRect();
+    state.titleBox = r;
+    state.titleAt = { x: r.left + r.width * 0.5, y: r.top + r.height * 0.5 };
+
+    const shape = { a1: rr(0.08, 0.22), p1: rr(0, TAU), a2: rr(0.04, 0.14), p2: rr(0, TAU) };
+    state.layers = LAYER_DEFS.map((def) => buildLayer(def, vs, shape));
+    buildRasters();
+
+    state.spikes = [];
+    state.syn = [];
+    state.waves = [];
+    state.G = 1;
+  }
+
+  // ---------------------------------------------------------------- simulation
+
+  function fire(n, layer) {
+    n.v = -0.3;
+    n.refr = 0.14;
+    n.thr += 0.5;
+    n.act = Math.min(1.3, n.act + 1);
+    n.fireT = state.t;
+    state.fires++;
+    if (state.spikes.length < SIM.maxSpikes) {
+      state.spikes.push({ b: n.axon, s: 0, layer, done: false });
+    }
+  }
+
+  // 拍動ごとに、広がる速さと強さの偏りを方向ごとに振り直す
+  function heartbeat(t) {
+    const breath = Math.sin((t * TAU) / SIM.breathPeriod);
+    // 呼吸性洞性不整脈: 吸気で速く、呼気で遅くなる
+    const bpm = 62 + 5 * breath + 16 * state.excite + rr(-1.5, 1.5);
+    const shape = {
+      a1: rr(0.06, 0.2), p1: rr(0, TAU), a2: rr(0, 0.12), p2: rr(0, TAU),
+      speed: state.waveSpeed * rr(0.88, 1.12),
+    };
+    state.waves.push({ t0: t, amp: 1, ...shape });
+    state.waves.push({ t0: t + SIM.dub, amp: 0.48, ...shape });
+    state.lastBeat = t;
+    state.nextBeat = t + 60 / bpm;
+  }
+
+  function waveR(wv, th, t) {
+    const m = 1 + wv.a1 * Math.cos(th - wv.p1) + wv.a2 * Math.cos(2 * th - wv.p2);
+    return state.core.R + Math.max(0, t - wv.t0) * wv.speed * m;
+  }
+
+  // 収縮: 一瞬で縮み、ゆっくり戻る
+  function contraction(since) {
+    if (since < 0) return 0;
+    return since < 0.06 ? since / 0.06 : Math.exp(-(since - 0.06) / 0.2);
+  }
+
+  function stimulate(x, y, strength, radius) {
+    for (const layer of state.layers) {
+      const M = layer.m;
+      const det = M.a * M.d - M.b * M.c;
+      const ux = x - M.e;
+      const uy = y - M.f;
+      const lx = (M.d * ux - M.c * uy) / det;
+      const ly = (-M.b * ux + M.a * uy) / det;
+      const R = radius * (layer.def.sharp ? 1 : 0.8);
+      for (const n of layer.neurons) {
+        const d = Math.hypot(n.x - lx, n.y - ly);
+        if (d < R) {
+          const f = (1 - d / R) ** 2;
+          n.v += strength * f;
+          n.psp = Math.min(1, n.psp + f * 0.5);
+        }
+      }
+    }
+  }
+
+  function advanceSpike(sp, dt) {
+    const layer = sp.layer;
+    const b = sp.b;
+    sp.s += SIM.spikeSpeed * layer.s * dt;
+    if (sp.done) return sp.s - SIM.trail * layer.s < b.len;
+    if (sp.s < b.len) return true;
+
+    sp.done = true;
+    const over = sp.s - b.len;
+    if (b.target) {
+      const m = b.target;
+      m.v += b.w * state.G;
+      m.psp = Math.min(1, m.psp + 0.7);
+      state.syn.push({ x: b.ex, y: b.ey, t0: state.t, layer });
+    }
+    for (const k of b.kids) {
+      if (state.spikes.length < SIM.maxSpikes) state.spikes.push({ b: k, s: over, layer, done: false });
+    }
+    return true;
+  }
+
+  function simulate(dt) {
+    const t = (state.t += dt);
+    const C = state.core;
+
+    if (t >= state.nextBeat) heartbeat(t);
+    const limit = state.waveMax + state.waveWidth;
+    state.waves = state.waves.filter((wv) => (t - wv.t0) * wv.speed * (1 - wv.a1 - wv.a2) < limit);
+
+    // ときどき、ひとつの細胞に強い入力が入る。そこから連鎖が始まる
+    if (t >= state.nextIdea) {
+      const pool = state.layers[rand() < 0.7 ? 1 : 0].neurons.filter(
+        (n) => n.x > 0 && n.x < state.w && n.y > 0 && n.y < state.h,
+      );
+      if (pool.length) {
+        const n = pool[(rand() * pool.length) | 0];
+        n.drive = rr(2.6, 3.6);
+        n.driveT = rr(0.35, 0.8);
+      }
+      state.nextIdea = t + rr(2.2, 5.5);
+    }
+
+    const leak = Math.exp(-dt / SIM.leak);
+    const thrDecay = Math.exp(-dt / 3.2);
+    const actDecay = Math.exp(-dt / 0.8);
+    const pspDecay = Math.exp(-dt / 0.3);
+    let count = 0;
+    state.fires = 0;
+
+    for (const layer of state.layers) {
+      for (const n of layer.neurons) {
+        count++;
+        n.v *= leak;
+        if (rand() < SIM.spont * dt) n.v += rr(0.3, 1.15);
+        if (n.driveT > 0) {
+          n.v += n.drive * dt;
+          n.driveT -= dt;
+        }
+        for (const wv of state.waves) {
+          if (t < wv.t0) continue;
+          if (n.dO > waveR(wv, n.aO, t - dt) && n.dO <= waveR(wv, n.aO, t)) n.v += SIM.heartKick * wv.amp;
+        }
+        n.thr = 1 + (n.thr - 1) * thrDecay;
+        n.act *= actDecay;
+        n.psp *= pspDecay;
+        if (n.refr > 0) n.refr -= dt;
+        else if (n.v >= n.thr) fire(n, layer);
+      }
+    }
+
+    state.spikes = state.spikes.filter((sp) => advanceSpike(sp, dt));
+    state.syn = state.syn.filter((e) => t - e.t0 < 0.4);
+
+    // 恒常性: 発火が多すぎれば結合を弱め、少なすぎれば強める
+    const inst = state.fires / Math.max(1, count) / dt;
+    state.rate += (inst - state.rate) * (1 - Math.exp(-dt / 5));
+    state.G = clamp(state.G * Math.exp(((SIM.targetRate - state.rate) / SIM.targetRate) * dt * 0.3), 0.6, 2.2);
+
+    const p = state.pointer;
+    p.energy *= Math.exp(-dt / 0.35);
+    state.excite += (Math.min(1, p.energy) - state.excite) * (1 - Math.exp(-dt / (p.energy > state.excite ? 1.5 : 6)));
+    state.par.x += (p.nx - state.par.x) * (1 - Math.exp(-dt / 0.8));
+    state.par.y += (p.ny - state.par.y) * (1 - Math.exp(-dt / 0.8));
+
+    C.ox = 5 * state.vs * C.wx(t);
+    C.oy = 5 * state.vs * C.wy(t);
+
+    // 組織は漂い、ゆっくり回り、コアが血を押し出すたびに外側へわずかに膨らむ
+    const since = t - state.lastBeat;
+    state.pulse = contraction(since) + 0.45 * contraction(since - SIM.dub);
+    const breath = Math.sin((t * TAU) / SIM.breathPeriod);
+    for (const layer of state.layers) {
+      const d = layer.def;
+      const sc = 1 + (0.0045 * state.pulse + 0.004 * breath) * d.drift;
+      const rot = d.turn * layer.wr(t);
+      const cs = Math.cos(rot) * sc;
+      const sn = Math.sin(rot) * sc;
+      const dx = state.par.x * 9 * d.parallax + d.wander * state.vs * layer.wx(t);
+      const dy = state.par.y * 6 * d.parallax + d.wander * state.vs * layer.wy(t);
+      const M = layer.m;
+      M.a = cs;
+      M.b = sn;
+      M.c = -sn;
+      M.d = cs;
+      M.e = C.x - (cs * C.x - sn * C.y) + dx;
+      M.f = C.y - (sn * C.x + cs * C.y) + dy;
+    }
+  }
+
+  // ---------------------------------------------------------------- rendering
+
+  function ring(d, r, wd) {
+    const x = d - r;
+    const front = wd * 0.2;
+    if (x > front || x < -wd) return 0;
+    if (x >= 0) return 1 - x / front;
+    const u = 1 + x / wd;
+    return u * u;
+  }
+
+  function waveAt(d, th) {
+    let v = 0;
+    for (const wv of state.waves) {
+      if (state.t < wv.t0) continue;
+      const r = waveR(wv, th, state.t);
+      v += wv.amp * ring(d, r, state.waveWidth) * (1 - 0.35 * r / state.waveMax);
+    }
+    return Math.min(1, v);
+  }
+
+  function setMatrix(g, M, k) {
+    g.setTransform(k * M.a, k * M.b, k * M.c, k * M.d, k * M.e, k * M.f);
+  }
+
+  function blit(img, res, M, alpha) {
+    setMatrix(ctx, M, state.dpr);
+    ctx.globalAlpha = alpha;
+    ctx.drawImage(img, -PAD, -PAD, img.width / res, img.height / res);
+    ctx.globalAlpha = 1;
+  }
+
+  function drawCore() {
+    const C = state.core;
+    const pulse = state.pulse;
+    const t = state.t;
+    const k = state.dpr;
+    const M = state.layers[1].m;
+    cctx.setTransform(1, 0, 0, 1, 0, 0);
+    cctx.globalCompositeOperation = 'source-over';
+    cctx.globalAlpha = 1;
+    cctx.fillStyle = '#000';
+    cctx.fillRect(0, 0, coreCanvas.width, coreCanvas.height);
+    cctx.globalCompositeOperation = 'lighter';
+    cctx.setTransform(k * M.a, k * M.b, k * M.c, k * M.d, k * (M.e - C.x0), k * (M.f - C.y0));
+    const cx = C.x + C.ox;
+    const cy = C.y + C.oy;
+
+    const heat = 0.34 + 0.66 * Math.min(1, pulse);
+    glowAt(cctx, cx, cy, C.R * 4.6, 0.14 + 0.3 * pulse);
+
+    // 収縮期には縮み、拡張期にわずかに膨らんで戻る。形も常に少しずつ歪む
+    const scl = 1 - 0.09 * contraction(t - state.lastBeat) - 0.04 * contraction(t - state.lastBeat - SIM.dub)
+      + 0.02 * Math.sin((t * TAU) / SIM.breathPeriod);
+    const squash = 0.06 * C.ws(t);
+    C.knots.forEach((img, i) => {
+      const size = img.width / C.knotRes;
+      cctx.save();
+      cctx.translate(cx, cy);
+      cctx.scale(1 + squash, 1 - squash);
+      cctx.rotate(t * (i ? -0.045 : 0.06) + i);
+      cctx.scale(scl * (i ? 0.97 : 1), scl);
+      cctx.globalAlpha = Math.min(1, 0.66 + 0.45 * pulse);
+      cctx.drawImage(img, -size / 2, -size / 2, size, size);
+      cctx.restore();
+    });
+    cctx.globalAlpha = 1;
+    glowAt(cctx, cx, cy, C.R * 1.2 * scl, heat * 0.75);
+  }
+
+  function pointAt(b, s) {
+    const c = b.cum;
+    let lo = 0;
+    let hi = c.length - 1;
+    while (hi - lo > 1) {
+      const mid = (lo + hi) >> 1;
+      if (c[mid] <= s) lo = mid;
+      else hi = mid;
+    }
+    const u = (s - c[lo]) / Math.max(1e-6, c[hi] - c[lo]);
+    const p = b.pts;
+    return {
+      i: lo,
+      x: p[lo * 2] + (p[hi * 2] - p[lo * 2]) * u,
+      y: p[lo * 2 + 1] + (p[hi * 2 + 1] - p[lo * 2 + 1]) * u,
+    };
+  }
+
+  function drawSpike(sp, sharp) {
+    const b = sp.b;
+    const s = sp.layer.s;
+    const head = Math.min(sp.s, b.len);
+    const tail = Math.max(0, sp.s - SIM.trail * s);
+    if (head - tail < 0.5) return;
+    const hp = pointAt(b, head);
+    const tp = pointAt(b, tail);
+    const p = b.pts;
+
+    ctx.beginPath();
+    ctx.moveTo(tp.x, tp.y);
+    for (let k = tp.i + 1; k <= hp.i; k++) ctx.lineTo(p[k * 2], p[k * 2 + 1]);
+    ctx.lineTo(hp.x, hp.y);
+    const fade = sp.done ? clamp(1 - (sp.s - b.len) / (SIM.trail * s), 0, 1) : 1;
+    const grd = ctx.createLinearGradient(hp.x, hp.y, tp.x, tp.y);
+    grd.addColorStop(0, white((sharp ? 1 : 0.34) * fade));
+    grd.addColorStop(1, white(0));
+    ctx.strokeStyle = grd;
+    ctx.lineWidth = sharp ? 1.8 * s : 3.4 * s;
+    ctx.stroke();
+
+    if (!sp.done) {
+      if (sharp) glowAt(ctx, hp.x, hp.y, 11 * s, 0.9);
+      else glowAt(ctx, hp.x, hp.y, 16 * s, 0.35);
+    }
+  }
+
+  function drawNeuron(n, sharp, gain) {
+    const age = state.t - n.fireT;
+    const s = n.s;
+    const R = n.reach + 10 * s;
+    const wr = age * SIM.dendriteWave * s;
+    const W = 38 * s;
+    const inWave = wr < R + W;
+    const base = Math.min(1, n.act) * 0.4 * gain;
+
+    if (base > 0.012 || inWave) {
+      let style;
+      if (inWave) {
+        const peak = Math.min(1, 0.85 * gain + base);
+        style = ctx.createRadialGradient(n.x, n.y, 0, n.x, n.y, R);
+        const stops = [[0, base], [wr - W, base], [wr, peak], [wr + W * 0.3, 0], [R, 0]];
+        let last = -1;
+        for (const [d, v] of stops) {
+          const o = d / R;
+          if (o < 0 || o > 1 || o <= last) continue;
+          style.addColorStop(o, white(v));
+          last = o;
+        }
+      } else {
+        style = white(base);
+      }
+      ctx.strokeStyle = style;
+      const wm = sharp ? 1 : 2.4;
+      for (const b of n.buckets) {
+        ctx.lineWidth = b.w * wm;
+        ctx.stroke(b.path);
+      }
+    }
+
+    const somaA = Math.min(1, n.act * 0.9 + n.psp * 0.35) * gain;
+    if (somaA > 0.01) {
+      ctx.fillStyle = white(somaA);
+      ctx.fill(n.soma, 'evenodd');
+      glowAt(ctx, n.x, n.y, (16 + 30 * Math.min(1, n.act)) * s * (sharp ? 1 : 1.6), (n.act * 0.75 + n.psp * 0.22) * gain);
+    }
+  }
+
+  function render() {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    ctx.globalCompositeOperation = 'lighter';
+    const { back, near, backRes, grain } = state.raster;
+    const [farL, nearL] = state.layers;
+    blit(back, backRes, farL.m, 1);
+    blit(near, state.dpr, nearL.m, 1);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = grain;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    drawCore();
+
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    for (const layer of state.layers) {
+      const sharp = layer.def.sharp;
+      const gain = layer.def.gain;
+      setMatrix(ctx, layer.m, state.dpr);
+
+      for (const n of layer.neurons) {
+        if (n.act > 0.01 || n.psp > 0.02 || state.t - n.fireT < 1) drawNeuron(n, sharp, gain);
+      }
+      for (const sp of state.spikes) if (sp.layer === layer) drawSpike(sp, sharp);
+      for (const e of state.syn) {
+        if (e.layer !== layer) continue;
+        const u = 1 - (state.t - e.t0) / 0.4;
+        glowAt(ctx, e.x, e.y, (sharp ? 9 : 14) * layer.s, u * u * (sharp ? 0.85 : 0.3));
+      }
+    }
+
+    const p = state.pointer;
+    if (p.seen && p.energy > 0.01) {
+      ctx.setTransform(state.dpr, 0, 0, state.dpr, 0, 0);
+      glowAt(ctx, p.x, p.y, 70, Math.min(1, p.energy) * 0.1);
+    }
+
+    const C = state.core;
+    const T = state.titleAt;
+    const beat = waveAt(Math.hypot(T.x - C.x, T.y - C.y), Math.atan2(T.y - C.y, T.x - C.x));
+    title.style.setProperty('--beat', beat.toFixed(3));
+  }
+
+  // ---------------------------------------------------------------- loop
+
+  let last = 0;
+  let running = false;
+
+  function frame(now) {
+    if (!running) return;
+    requestAnimationFrame(frame);
+    const raw = last ? (now - last) / 1000 : 1 / 60;
+    last = now;
+    const dt = Math.min(raw, 1 / 20);
+
+    simulate(dt);
+    render();
+
+    // 描画が追いつかない端末では解像度を落とす。組織の形はそのまま
+    state.frames++;
+    state.frameEMA += (raw - state.frameEMA) * 0.05;
+    if (state.frames > 150 && state.frameEMA > 1 / 38 && state.quality > 0.5) {
+      state.quality = Math.max(0.5, state.quality * 0.75);
+      state.frames = 0;
+      state.frameEMA = 1 / 60;
+      sizeCanvas();
+      sizeCore();
+      buildRasters();
+    }
+  }
+
+  function renderStill() {
+    // 数秒ぶん進めてから、その一瞬だけを止めて見せる
+    for (let i = 0; i < 240; i++) simulate(1 / 60);
+    state.waves = [];
+    state.pulse = 0;
+    render();
+    title.style.setProperty('--beat', '0');
+  }
+
+  function start() {
+    if (reduceMotion.matches) {
+      running = false;
+      renderStill();
+      return;
+    }
+    if (running) return;
+    running = true;
+    last = 0;
+    requestAnimationFrame(frame);
+  }
+
+  // ---------------------------------------------------------------- input
+
+  window.addEventListener('pointermove', (e) => {
+    const p = state.pointer;
+    const d = p.seen ? Math.hypot(e.clientX - p.x, e.clientY - p.y) : 0;
+    p.x = e.clientX;
+    p.y = e.clientY;
+    p.nx = (e.clientX / state.w - 0.5) * 2;
+    p.ny = (e.clientY / state.h - 0.5) * 2;
+    p.seen = true;
+    p.energy = Math.min(1.5, p.energy + d / 260);
+    if (running) stimulate(p.x, p.y, Math.min(0.12, d / 400), 110);
+  }, { passive: true });
+
+  window.addEventListener('pointerdown', (e) => {
+    const p = state.pointer;
+    p.x = e.clientX;
+    p.y = e.clientY;
+    p.seen = true;
+    p.energy = Math.min(1.5, p.energy + 0.8);
+    stimulate(e.clientX, e.clientY, 1.6, 150);
+    if (!running) renderStill();
+  });
+
+  let resizeTimer = 0;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      build();
+      if (!running) renderStill();
+    }, 180);
+  });
+
+  document.addEventListener('visibilitychange', () => { last = 0; });
+  reduceMotion.addEventListener('change', () => {
+    running = false;
+    start();
+  });
+
+  installLUT('lut', LUT_TISSUE);
+  installLUT('lut-core', LUT_CORE);
+  build();
+  start();
+})();
+</script>
+</body>
+</html>
